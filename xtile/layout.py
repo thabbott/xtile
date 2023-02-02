@@ -104,9 +104,19 @@ def _trim_outer(darrs, dim):
     for i in range(1, len(darrs)):
         darrs[i] = darrs[i].isel({dim: slice(1,None)})
 
+# Change coordinate labels to nan 
+def _make_nan_coord(darrs, dim):
+    for i in range(len(darrs)):
+        darrs[i] = darrs[i].assign_coords({
+            dim: np.full(darrs[i][dim].shape, np.nan)})
+
 # Merge implementation for variables with only a single concatenation dimension
-def _merge_1d(dsets, var, dim, new_coord, outer):
+# The set_to_nan argument is required, in some cases, to avoid expanding orthogonal 
+# concatenation coordinates when this function is called from _merge_2d.
+def _merge_1d(dsets, var, dim, new_coord, outer, set_to_nan=None):
     darrs = [dset[var] for dset in dsets]
+    if set_to_nan:
+        _make_nan_coord(darrs, set_to_nan)
     if outer:
         _trim_outer(darrs, dim)
     darr = xr.concat(darrs, xr.DataArray(data=new_coord, coords={dim: new_coord}, name=dim))
@@ -114,7 +124,10 @@ def _merge_1d(dsets, var, dim, new_coord, outer):
 
 # Merge implementation for variables with two concatenation dimensions
 def _merge_2d(dsets, var, xdim, ydim, new_xcoord, new_ycoord, x_outer, y_outer):
-    darrs = [_merge_1d(dsets[i,:], var, xdim, new_xcoord, x_outer) for i in range(dsets.shape[0])]
+    darrs = [
+        _merge_1d(dsets[i,:], var, xdim, new_xcoord, x_outer, set_to_nan=ydim)
+        for i in range(dsets.shape[0])
+    ]
     if y_outer:
         _trim_outer(darrs, ydim)
     darr = xr.concat(darrs, xr.DataArray(data=new_ycoord, coords={ydim: new_ycoord}, name=ydim))
@@ -207,4 +220,54 @@ def merge(dsets, x, y, global_coords, reference_dataset=(0,0), outer=[]):
 
     return xr.Dataset(data_vars=data_vars, coords=coords, attrs=ref.attrs)
 
+def index_coords(x, y, shape, sizes, outer=[]):
+    """
+    Create a set of index coordinates suitable for use as the `global_coords` argument 
+    of `merge`, assuming that all tiles within a layout have the same shape.
 
+    Parameters
+    ----------
+    x, y: str or list of str 
+        Names of x and y index coordinates 
+
+    shape: (int, int)
+        Shape of the layout. Elements are the number of tiles in x and y 
+        directions, respectively.
+
+    sizes: dict (str -> int)
+        Mapping from coordinate names to sizes within each tile. This function 
+        assumes that all tiles have the same shape, so the global coordinate for 
+        a coordinate with name `c` will be `range(1, shape[i]*sizes['c'] + 1)`,
+        where `i = 0` if `c` is in `y` and `i = 1` if `c` is in `x`.
+
+    Keyword arguments
+    -----------------
+    outer: str or list of str, default = []
+        If provided, any coordinates listed in `outer` will be treated as coordinates 
+        defined with overlap on outer edges with tiles, and the global coordinate for
+        a coordinate with name `c` will be `range(1, shape[i]*(sizes['c'] - 1) + 2)`.
+    
+    Returns
+    -------
+    global_coords: dict (str -> int)
+        Mapping from concatenation dimensions (entries in `x` and `y`) to 
+        post-concatenation ("global") coordinates.
+    """
+    if len(shape) != 2:
+        raise ValueError('shape must be 2D but is {}D'.format(len(shape)))
+    if isinstance(x, str):
+        x = (x,)
+    if isinstance(y, str):
+        y = (y,)
+    global_coords = {}
+    for c in x:
+        if c in outer:
+            global_coords[c] = np.arange(1, shape[1]*(sizes[c] - 1) + 2)
+        else:
+            global_coords[c] = np.arange(1, shape[1]*sizes[c] + 1)
+    for c in y:
+        if c in outer:
+            global_coords[c] = np.arange(1, shape[0]*(sizes[c] - 1) + 2)
+        else:
+            global_coords[c] = np.arange(1, shape[0]*sizes[c] + 1)
+    return global_coords
